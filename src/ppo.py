@@ -56,7 +56,7 @@ class PPOTrainer:
                 lp   = dist.log_prob(act).sum().item()
 
             next_obs, rew, done, _ = env.step(act.cpu().numpy())
-            self._push(obs, act.numpy(), rew, done, val[0].item(), lp)
+            self._push(obs, act.cpu().numpy(), rew, done, val[0].item(), lp)
 
             obs = next_obs if not done else env.reset()
 
