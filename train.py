@@ -23,18 +23,34 @@ except ImportError:
     pygame = None
 
 
+def get_device():
+    try:
+        import torch_directml
+        dev = torch_directml.device()
+        print(f"GPU gevonden: AMD via DirectML ({dev})")
+        return dev
+    except ImportError:
+        pass
+    if torch.cuda.is_available():
+        print(f"GPU gevonden: CUDA ({torch.cuda.get_device_name(0)})")
+        return torch.device("cuda")
+    print("Geen GPU gevonden, training op CPU.")
+    return torch.device("cpu")
+
+
 def train(mode, iters, steps, render, resume, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs("logs", exist_ok=True)
 
+    device = get_device()
     env    = DrivingEnv(mode=mode, render_mode=render)
-    policy = DrivingPolicy()
+    policy = DrivingPolicy().to(device)
 
     if resume:
         print(f"Resuming from {resume}")
-        policy.load_state_dict(torch.load(resume, map_location="cpu"))
+        policy.load_state_dict(torch.load(resume, map_location=device))
 
-    trainer = PPOTrainer(policy, lr=3e-4, epochs=10, batch=64)
+    trainer = PPOTrainer(policy, device=device, lr=3e-4, epochs=10, batch=64)
 
     print(f"\nTraining Tesla AI  |  mode={mode}  iters={iters}  steps/iter={steps}")
     print(f"Total env steps: {iters * steps:,}\n")
@@ -55,11 +71,13 @@ def train(mode, iters, steps, render, resume, save_dir):
 
         if mean_rew > best:
             best = mean_rew
-            torch.save(policy.state_dict(), f"{save_dir}/best_{mode}.pth")
+            torch.save(policy.to("cpu").state_dict(), f"{save_dir}/best_{mode}.pth")
+            policy.to(device)
 
         if (it + 1) % 50 == 0:
             path = f"{save_dir}/{mode}_iter{it+1}.pth"
-            torch.save(policy.state_dict(), path)
+            torch.save(policy.to("cpu").state_dict(), path)
+            policy.to(device)
             with open(f"logs/train_{mode}.json", "w") as f:
                 json.dump(log, f)
             print(f"    → saved {path}")
@@ -70,7 +88,7 @@ def train(mode, iters, steps, render, resume, save_dir):
                 if ev.type == pygame.QUIT:
                     env.close(); return
 
-    torch.save(policy.state_dict(), f"{save_dir}/{mode}_final.pth")
+    torch.save(policy.to("cpu").state_dict(), f"{save_dir}/{mode}_final.pth")
     with open(f"logs/train_{mode}.json", "w") as f:
         json.dump(log, f)
 

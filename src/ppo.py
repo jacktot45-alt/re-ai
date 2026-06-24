@@ -9,11 +9,12 @@ from torch.optim import Adam
 
 
 class PPOTrainer:
-    def __init__(self, policy,
+    def __init__(self, policy, device=None,
                  lr=3e-4, clip=0.2, ent_coef=0.01, val_coef=0.5,
                  max_grad=0.5, batch=64, epochs=10,
                  gamma=0.99, lam=0.95):
         self.policy    = policy
+        self.device    = device or torch.device("cpu")
         self.opt       = Adam(policy.parameters(), lr=lr)
         self.clip      = clip
         self.ent_coef  = ent_coef
@@ -47,14 +48,14 @@ class PPOTrainer:
         done = False
 
         for _ in range(n_steps):
-            obs_t = torch.FloatTensor(obs).unsqueeze(0)
+            obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 mean, log_std, val = self.policy(obs_t)
                 dist = torch.distributions.Normal(mean, log_std.exp())
                 act  = dist.sample()[0].clamp(-1, 1)
                 lp   = dist.log_prob(act).sum().item()
 
-            next_obs, rew, done, _ = env.step(act.numpy())
+            next_obs, rew, done, _ = env.step(act.cpu().numpy())
             self._push(obs, act.numpy(), rew, done, val[0].item(), lp)
 
             obs = next_obs if not done else env.reset()
@@ -65,17 +66,17 @@ class PPOTrainer:
 
     def update(self, last_obs):
         """Run PPO update; returns mean loss."""
-        obs_t = torch.FloatTensor(last_obs).unsqueeze(0)
+        obs_t = torch.FloatTensor(last_obs).unsqueeze(0).to(self.device)
         with torch.no_grad():
             _, _, last_val = self.policy(obs_t)
 
         adv, ret = self._gae(last_val[0].item())
 
-        obs_T  = torch.FloatTensor(np.array(self.buf["obs"]))
-        act_T  = torch.FloatTensor(np.array(self.buf["act"]))
-        lp_T   = torch.FloatTensor(np.array(self.buf["lp"]))
-        adv_T  = torch.FloatTensor(adv)
-        ret_T  = torch.FloatTensor(ret)
+        obs_T  = torch.FloatTensor(np.array(self.buf["obs"])).to(self.device)
+        act_T  = torch.FloatTensor(np.array(self.buf["act"])).to(self.device)
+        lp_T   = torch.FloatTensor(np.array(self.buf["lp"])).to(self.device)
+        adv_T  = torch.FloatTensor(adv).to(self.device)
+        ret_T  = torch.FloatTensor(ret).to(self.device)
         adv_T  = (adv_T - adv_T.mean()) / (adv_T.std() + 1e-8)
 
         n, total_loss, n_up = len(self.buf["obs"]), 0.0, 0
