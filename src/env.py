@@ -22,27 +22,26 @@ CAM_H = 128
 # ─────────────────────────────────────────────
 
 def capture_camera(world_surf, car_x, car_y, car_heading, cam_offset):
-    """Return (CAM_H, CAM_W, 3) uint8 array for one camera."""
-    W, H = world_surf.get_size()
-    theta = -(car_heading + cam_offset)          # pygame rotates CCW
+    """Return (CAM_H, CAM_W, 3) uint8 array for one camera.
 
-    rotated = pygame.transform.rotate(world_surf, theta)
-    rW, rH  = rotated.get_size()
+    Fast path: crop a small region around the car first, then rotate only
+    that patch — instead of rotating the whole (600x4000) world every call.
+    The car ends up at the centre of the patch, so no projection math needed.
+    """
+    R = 130                                        # half-size of patch to crop
+    cxi, cyi = int(car_x), int(car_y)
 
-    t   = math.radians(theta)
-    dx  = car_x - W / 2
-    dy  = car_y - H / 2
-    crx = rW / 2 + dx * math.cos(t) - dy * math.sin(t)
-    cry = rH / 2 + dx * math.sin(t) + dy * math.cos(t)
+    region = pygame.Surface((2 * R, 2 * R))
+    region.fill((30, 30, 30))                      # off-world fill (rarely seen)
+    region.blit(world_surf, (R - cxi, R - cyi))    # car now centred at (R, R)
+
+    theta   = -(car_heading + cam_offset)          # pygame rotates CCW
+    rotated = pygame.transform.rotate(region, theta)
+    rW, rH  = rotated.get_size()                   # car stays at the centre
 
     # crop: car appears in bottom 20 % of view
-    cx = int(crx - CAM_W / 2)
-    cy = int(cry - CAM_H * 0.8)
-    cx = max(0, min(cx, rW - CAM_W))
-    cy = max(0, min(cy, rH - CAM_H))
-
-    if cx + CAM_W > rW or cy + CAM_H > rH:
-        return np.zeros((CAM_H, CAM_W, 3), dtype=np.uint8)
+    cx = int(rW / 2 - CAM_W / 2)
+    cy = int(rH / 2 - CAM_H * 0.8)
 
     tmp = pygame.Surface((CAM_W, CAM_H))
     tmp.blit(rotated, (0, 0), (cx, cy, CAM_W, CAM_H))
@@ -341,6 +340,8 @@ class DrivingEnv:
         self.tesla = Tesla(sx, sy)
         self.step_n    = 0
         self.ep_reward = 0.0
+        self._cached_obs  = None
+        self._cached_surf = None
         return self._obs()
 
     def step(self, action):
@@ -352,7 +353,11 @@ class DrivingEnv:
 
         reward, done = self._reward()
         self.ep_reward += reward
-        return self._obs(), reward, done, {"step": self.step_n, "ep_reward": self.ep_reward}
+        # cache so render() reuses without recomputing
+        self._cached_obs  = None
+        self._cached_surf = None
+        obs = self._obs()
+        return obs, reward, done, {"step": self.step_n, "ep_reward": self.ep_reward}
 
     def render(self, action=None):
         if not self.render_mode:
@@ -360,8 +365,8 @@ class DrivingEnv:
         scr = self.screen
         scr.fill((15, 15, 25))
 
-        # ── bird's-eye view (left panel) ─────
-        world_s = self.world.get_surface(self.tesla.x, self.tesla.y, self.tesla.angle)
+        # ── bird's-eye view — reuse cached surface ──
+        world_s = self._cached_surf
         vw, vh  = 340, 460
         bx = int(np.clip(self.tesla.x - vw//2, 0, self.world.W - vw))
         by = int(np.clip(self.tesla.y - vh//2, 0, self.world.H - vh))
@@ -370,8 +375,8 @@ class DrivingEnv:
         bird = pygame.transform.scale(bird, (340, 460))
         scr.blit(bird, (5, 80))
 
-        # ── four camera views (right panel) ──
-        obs = self._obs()
+        # ── four camera views — reuse cached obs ──
+        obs = self._cached_obs
         for i, name in enumerate(CAMERA_NAMES):
             col, row = i % 2, i // 2
             px, py   = 360 + col * 300, 10 + row * 305
@@ -407,13 +412,17 @@ class DrivingEnv:
     # ── internals ────────────────────────────
 
     def _obs(self):
-        ws  = self.world.get_surface(self.tesla.x, self.tesla.y, self.tesla.angle)
+        if self._cached_obs is not None:
+            return self._cached_obs
+        ws = self.world.get_surface(self.tesla.x, self.tesla.y, self.tesla.angle)
+        self._cached_surf = ws
         imgs = [capture_camera(ws, self.tesla.x, self.tesla.y,
                                self.tesla.angle, off)
                 for off in CAMERA_OFFSETS]
         obs = np.stack(imgs, axis=0)          # (4, H, W, 3)
         obs = obs.transpose(0, 3, 1, 2)       # (4, 3, H, W)
-        return obs.astype(np.float32) / 255.0
+        self._cached_obs = obs.astype(np.float32) / 255.0
+        return self._cached_obs
 
     def _reward(self):
         x, y = self.tesla.x, self.tesla.y
