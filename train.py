@@ -48,7 +48,7 @@ def train(mode, iters, steps, render, resume, save_dir):
 
     if resume:
         print(f"Resuming from {resume}")
-        policy.load_state_dict(torch.load(resume, map_location=device))
+        policy.load_state_dict(torch.load(resume, map_location="cpu"))
 
     trainer = PPOTrainer(policy, device=device, lr=3e-4, epochs=10, batch=64)
 
