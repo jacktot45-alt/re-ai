@@ -120,6 +120,16 @@ class HighwayWorld:
                 return True
         return False
 
+    def nearest_car_ahead(self, x, y, look_ahead=200):
+        """Distance in pixels to the closest NPC directly ahead (lower y = further up)."""
+        min_dist = float("inf")
+        for npc in self.npcs:
+            dy = y - npc["y"]           # positive → NPC is above car (ahead)
+            dx = abs(x - npc["x"])
+            if 0 < dy < look_ahead and dx < self.LANE_W * 0.8:
+                min_dist = min(min_dist, dy)
+        return min_dist
+
     def get_surface(self, tx=None, ty=None, ta=None):
         s = self.surf.copy()
         for npc in self.npcs:
@@ -222,6 +232,16 @@ class CityWorld:
                 return True
         return False
 
+    def nearest_car_ahead(self, x, y, look_ahead=200):
+        """Distance in pixels to the closest NPC directly ahead."""
+        min_dist = float("inf")
+        for npc in self.npcs:
+            dy = y - npc["y"]
+            dx = abs(x - npc["x"])
+            if 0 < dy < look_ahead and dx < self.LANE_W * 0.8:
+                min_dist = min(min_dist, dy)
+        return min_dist
+
     def get_surface(self, tx=None, ty=None, ta=None):
         s = self.surf.copy()
         for npc in self.npcs:
@@ -268,7 +288,11 @@ class Tesla:
         self.speed = 2.0
 
     def step(self, steering, throttle):
-        self.speed = float(np.clip(self.speed + throttle * 0.4, 0, self.MAX_SPEED))
+        if throttle >= 0:
+            self.speed = float(np.clip(self.speed + throttle * 0.4, 0, self.MAX_SPEED))
+        else:
+            # Braking is stronger than accelerating
+            self.speed = float(np.clip(self.speed + throttle * 1.2, 0, self.MAX_SPEED))
         if self.speed > 0.1:
             self.angle += steering * 3.0 * (self.speed / self.MAX_SPEED)
         rad     = math.radians(self.angle)
@@ -404,9 +428,27 @@ class DrivingEnv:
         if not self.world.is_on_road(x):
             reward = -5.0
         else:
-            lane_r  = max(0.0, 1.0 - self.world.nearest_lane_dist(x) / (self.world.LANE_W * 0.5))
-            speed_r = self.tesla.speed / self.tesla.MAX_SPEED * 0.5
-            reward  = lane_r + speed_r
+            # Lane-keeping reward
+            lane_r = max(0.0, 1.0 - self.world.nearest_lane_dist(x) / (self.world.LANE_W * 0.5))
+
+            # Adaptive speed reward based on distance to car ahead
+            dist_ahead = self.world.nearest_car_ahead(x, y, look_ahead=200)
+            SAFE_DIST  = 80   # pixels — comfortable following distance
+            DANGER_DIST = 40  # pixels — must brake immediately
+
+            if dist_ahead < DANGER_DIST:
+                # Too close: penalise speed, reward being slow
+                speed_r = -self.tesla.speed / self.tesla.MAX_SPEED * 1.5
+            elif dist_ahead < SAFE_DIST:
+                # Closing in: scale target speed down with distance
+                t = (dist_ahead - DANGER_DIST) / (SAFE_DIST - DANGER_DIST)
+                target_speed = t * self.tesla.MAX_SPEED
+                speed_r = -max(0.0, self.tesla.speed - target_speed) * 0.5
+            else:
+                # Clear road: reward going fast
+                speed_r = self.tesla.speed / self.tesla.MAX_SPEED * 0.5
+
+            reward = lane_r + speed_r
 
         if self.step_n >= self.MAX_STEPS:
             done = True
