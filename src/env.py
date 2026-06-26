@@ -318,6 +318,7 @@ class DrivingEnv:
         assert mode in ("highway", "city")
         self.mode        = mode
         self.render_mode = render_mode
+        self.speed_limit = 6.5 if mode == "highway" else 4.0
         self._font       = None
         self.world       = None
         self.tesla       = None
@@ -391,7 +392,7 @@ class DrivingEnv:
         # ── HUD ──────────────────────────────
         texts = [
             (f"Mode : {self.mode.upper()}", (255, 210, 60)),
-            (f"Speed: {self.tesla.speed:.1f} m/s", (180, 255, 180)),
+            (f"Speed: {self.tesla.speed:.1f} / limit {self.speed_limit:.1f}", (180, 255, 180)),
             (f"Step : {self.step_n}", (180, 220, 255)),
             (f"Reward: {self.ep_reward:.1f}", (255, 180, 180)),
         ]
@@ -425,41 +426,43 @@ class DrivingEnv:
         return self._cached_obs
 
     def _reward(self):
-        x, y = self.tesla.x, self.tesla.y
-        done = False
+        x, y  = self.tesla.x, self.tesla.y
+        speed = self.tesla.speed
+        limit = self.speed_limit
 
-        if y < 50 or y > self.world.H - 50:
+        # reached the top of the road → goal completed (big bonus)
+        if y < 50:
+            return 100.0, True
+        # drove backwards off the start
+        if y > self.world.H - 50:
             return -50.0, True
-
+        # crashed into another car
         if self.world.check_collision(x, y):
             return -100.0, True
-
+        # left the road sideways
         if not self.world.is_on_road(x):
-            reward = -5.0
+            return -5.0, self.step_n >= self.MAX_STEPS
+
+        # ── on the road ──────────────────────────
+        lane_r = max(0.0, 1.0 - self.world.nearest_lane_dist(x) / (self.world.LANE_W * 0.5))
+
+        # speed limit it must follow — lowered when a car is close ahead
+        dist_ahead  = self.world.nearest_car_ahead(x, y, look_ahead=200)
+        SAFE, DANGER = 80, 40
+        if dist_ahead < DANGER:
+            target = 0.0                                  # must stop
+        elif dist_ahead < SAFE:
+            target = limit * (dist_ahead - DANGER) / (SAFE - DANGER)
         else:
-            # Lane-keeping reward
-            lane_r = max(0.0, 1.0 - self.world.nearest_lane_dist(x) / (self.world.LANE_W * 0.5))
+            target = limit                               # clear road → full limit
 
-            # Adaptive speed reward based on distance to car ahead
-            dist_ahead = self.world.nearest_car_ahead(x, y, look_ahead=200)
-            SAFE_DIST  = 80   # pixels — comfortable following distance
-            DANGER_DIST = 40  # pixels — must brake immediately
+        # reward forward progress up to the target; punish exceeding it
+        progress = min(speed, target) / limit            # 0..1 — MUST move to score
+        over     = max(0.0, speed - target) / limit      # too fast / too close
+        reward   = progress * (0.4 + 0.6 * lane_r) - 1.0 * over
 
-            if dist_ahead < DANGER_DIST:
-                # Too close: penalise speed, reward being slow
-                speed_r = -self.tesla.speed / self.tesla.MAX_SPEED * 1.5
-            elif dist_ahead < SAFE_DIST:
-                # Closing in: scale target speed down with distance
-                t = (dist_ahead - DANGER_DIST) / (SAFE_DIST - DANGER_DIST)
-                target_speed = t * self.tesla.MAX_SPEED
-                speed_r = -max(0.0, self.tesla.speed - target_speed) * 0.5
-            else:
-                # Clear road: reward going fast
-                speed_r = self.tesla.speed / self.tesla.MAX_SPEED * 0.5
+        # actively discourage sitting still on a clear road
+        if target > 1.0 and speed < 0.5:
+            reward -= 0.2
 
-            reward = lane_r + speed_r
-
-        if self.step_n >= self.MAX_STEPS:
-            done = True
-
-        return reward, done
+        return reward, self.step_n >= self.MAX_STEPS
