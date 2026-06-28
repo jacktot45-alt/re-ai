@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tesla Model 3 — Autonomous AI Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #e0e8f0; font-family: 'Courier New', monospace; overflow: hidden; }
+
+#topbar {
+  height: 44px; background: #161b22; border-bottom: 1px solid #30363d;
+  display: flex; align-items: center; padding: 0 16px; gap: 20px;
+}
+#topbar h1 { font-size: 15px; color: #58a6ff; letter-spacing: 1px; }
+#topbar .hint { font-size: 11px; color: #8b949e; }
+
+#layout { display: flex; height: calc(100vh - 44px); }
+
+/* ── 3D canvas ── */
+#viewport { flex: 1; position: relative; }
+#viewport canvas { width: 100% !important; height: 100% !important; display: block; }
+
+#overlay {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  text-align: center; pointer-events: none;
+}
+.spinner {
+  width: 44px; height: 44px; border: 3px solid #21262d;
+  border-top-color: #58a6ff; border-radius: 50%;
+  animation: spin .8s linear infinite; margin: 0 auto 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#overlay p { font-size: 13px; color: #8b949e; }
+
+/* ── sidebar ── */
+#sidebar {
+  width: 270px; background: #161b22; border-left: 1px solid #30363d;
+  padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+}
+.card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px; }
+.card h3 { font-size: 11px; text-transform: uppercase; color: #58a6ff; letter-spacing: 1px; margin-bottom: 8px; }
+
+/* camera grid */
+.cam-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.cam-cell { border: 1px solid #21262d; border-radius: 4px; overflow: hidden; text-align: center; }
+.cam-cell canvas { display: block; width: 100%; }
+.cam-cell span { display: block; font-size: 9px; color: #8b949e; padding: 2px 0; background: #0d1117; }
+
+/* buttons */
+.btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+button {
+  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  padding: 5px 10px; border-radius: 5px; font-size: 11px; cursor: pointer;
+}
+button:hover { background: #30363d; border-color: #58a6ff; }
+button.active { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+
+select {
+  width: 100%; background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  padding: 5px 8px; border-radius: 5px; font-size: 11px;
+}
+
+label { font-size: 11px; color: #8b949e; display: block; margin-bottom: 4px; }
+input[type=range] { width: 100%; accent-color: #58a6ff; }
+
+.info { font-size: 11px; color: #8b949e; line-height: 1.7; }
+.info code { color: #79c0ff; background: #161b22; padding: 1px 4px; border-radius: 3px; }
+
+/* drag hint */
+#drag-hint {
+  position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+  background: #161b22cc; border: 1px solid #30363d; border-radius: 6px;
+  padding: 6px 14px; font-size: 11px; color: #8b949e; pointer-events: none;
+}
+body.dragging #drag-hint { border-color: #58a6ff; color: #58a6ff; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>Tesla Model 3 · Autonomous AI Viewer</h1>
+  <span class="hint">Drag &amp; drop the .glb file · Orbit: left-drag · Zoom: scroll</span>
+</div>
+
+<div id="layout">
+  <!-- 3D viewport -->
+  <div id="viewport">
+    <canvas id="c"></canvas>
+    <div id="overlay">
+      <div class="spinner"></div>
+      <p id="load-msg">Drag tesla.glb onto this window<br>or open via a local server</p>
+    </div>
+    <div id="drag-hint">⬇ Drop .glb file here</div>
+  </div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+
+    <div class="card">
+      <h3>Camera Views</h3>
+      <div class="cam-grid">
+        <div class="cam-cell"><canvas id="c-front" width="110" height="80"></canvas><span>FRONT</span></div>
+        <div class="cam-cell"><canvas id="c-left"  width="110" height="80"></canvas><span>LEFT</span></div>
+        <div class="cam-cell"><canvas id="c-right" width="110" height="80"></canvas><span>RIGHT</span></div>
+        <div class="cam-cell"><canvas id="c-rear"  width="110" height="80"></canvas><span>REAR</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>View Presets</h3>
+      <div class="btn-row">
+        <button onclick="setView('free')">Free</button>
+        <button onclick="setView('front')">Front</button>
+        <button onclick="setView('side')">Side</button>
+        <button onclick="setView('top')">Top</button>
+        <button onclick="setView('rear')">Rear</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Animate</h3>
+      <div class="btn-row">
+        <button id="btn-spin" onclick="toggleSpin()">▶ Spin</button>
+        <button onclick="resetCam()">Reset Camera</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Lighting</h3>
+      <label>Ambient
+        <input type="range" id="r-ambient" min="0" max="100" value="40"
+               oninput="ambientLight.intensity = this.value/100">
+      </label>
+      <label>Sun
+        <input type="range" id="r-sun" min="0" max="300" value="120"
+               oninput="sunLight.intensity = this.value/100">
+      </label>
+    </div>
+
+    <div class="card">
+      <h3>Environment</h3>
+      <select onchange="setEnv(this.value)">
+        <option value="highway">Highway</option>
+        <option value="city">City</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <h3>How to Use</h3>
+      <div class="info">
+        <b>Install</b><br>
+        <code>pip install -r requirements.txt</code><br><br>
+        <b>Train highway</b><br>
+        <code>python train.py --mode highway --render</code><br><br>
+        <b>Train city</b><br>
+        <code>python train.py --mode city --render</code><br><br>
+        <b>Watch results</b><br>
+        <code>python evaluate.py checkpoints/best_highway.pth</code><br><br>
+        <b>Plot curves</b><br>
+        <code>python evaluate.py --plot logs/train_highway.json</code>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Three.js from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// ── renderer ─────────────────────────────────────────────────────────────────
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.outputEncoding    = THREE.sRGBEncoding;
+renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+// ── scene ────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog        = new THREE.FogExp2(0x0d1117, 0.018);
+
+// ── camera ───────────────────────────────────────────────────────────────────
+const cam = new THREE.PerspectiveCamera(40, 1, 0.1, 500);
+cam.position.set(6, 3.5, 9);
+cam.lookAt(0, 0.5, 0);
+
+const controls = new THREE.OrbitControls(cam, canvas);
+controls.target.set(0, 0.5, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance   = 2;
+controls.maxDistance   = 40;
+
+// ── lights ───────────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xffd9a0, 1.2);
+sunLight.position.set(6, 12, 8);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+sunLight.shadow.camera.near = 0.5;
+sunLight.shadow.camera.far  = 50;
+sunLight.shadow.camera.left = sunLight.shadow.camera.bottom = -10;
+sunLight.shadow.camera.right = sunLight.shadow.camera.top  =  10;
+scene.add(sunLight);
+
+scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3d5a3e, 0.35));
+
+// ── ground ───────────────────────────────────────────────────────────────────
+const gnd = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x1a2a1a, roughness: 0.9 })
+);
+gnd.rotation.x = -Math.PI / 2;
+gnd.receiveShadow = true;
+scene.add(gnd);
+
+// road strip under the car
+const road = new THREE.Mesh(
+  new THREE.PlaneGeometry(5, 40),
+  new THREE.MeshStandardMaterial({ color: 0x383838, roughness: 0.95 })
+);
+road.rotation.x = -Math.PI / 2;
+road.position.y = 0.001;
+scene.add(road);
+
+// lane markings
+for (let z = -18; z < 18; z += 4) {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.12, 2),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.2 })
+  );
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(0, 0.002, z);
+  scene.add(m);
+}
+
+// grid
+const grid = new THREE.GridHelper(60, 60, 0x1c2a3a, 0x1c2a3a);
+grid.position.y = 0.001;
+scene.add(grid);
+
+// ── camera sphere markers ─────────────────────────────────────────────────────
+const CAM_DEFS = [
+  { name: 'front', pos: [0,  0.72, -1.85], color: 0x00e87a, dir: [0, 0, -1] },
+  { name: 'left',  pos: [-0.95, 0.62,  0], color: 0xff8c00, dir: [-1,0,  0] },
+  { name: 'right', pos: [ 0.95, 0.62,  0], color: 0x1e90ff, dir: [ 1,0,  0] },
+  { name: 'rear',  pos: [0,  0.62,  1.9],  color: 0xff2d6b, dir: [0, 0,  1] },
+];
+
+let camMarkerGroup = null;
+
+function addCameraMarkers(parent) {
+  const g = new THREE.Group();
+  CAM_DEFS.forEach(cd => {
+    // glow sphere
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.065, 12, 12),
+      new THREE.MeshStandardMaterial({
+        color: cd.color, emissive: cd.color, emissiveIntensity: 0.8, roughness: 0.2
+      })
+    );
+    sphere.position.set(...cd.pos);
+    g.add(sphere);
+
+    // FOV cone
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.22, 0.45, 8, 1, true),
+      new THREE.MeshStandardMaterial({
+        color: cd.color, transparent: true, opacity: 0.25, side: THREE.DoubleSide
+      })
+    );
+    cone.position.set(...cd.pos);
+    const dir = new THREE.Vector3(...cd.dir);
+    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    cone.translateOnAxis(dir, 0.22);
+    g.add(cone);
+
+    // point light for glow effect
+    const pl = new THREE.PointLight(cd.color, 0.6, 1.5);
+    pl.position.set(...cd.pos);
+    g.add(pl);
+  });
+  parent.add(g);
+  return g;
+}
+
+// ── Tesla model ───────────────────────────────────────────────────────────────
+let teslaModel = null;
+let spinning   = false;
+let spinAngle  = 0;
+
+function loadGLB(url) {
+  document.getElementById('overlay').style.display = 'flex';
+  document.getElementById('load-msg').textContent  = 'Loading…';
+
+  const loader = new THREE.GLTFLoader();
+  loader.load(url,
+    gltf => {
+      if (teslaModel) scene.remove(teslaModel);
+      teslaModel = gltf.scene;
+
+      const box    = new THREE.Box3().setFromObject(teslaModel);
+      const size   = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const scale  = 4.2 / Math.max(size.x, size.y, size.z);
+      teslaModel.scale.setScalar(scale);
+      teslaModel.position.sub(center.multiplyScalar(scale));
+      teslaModel.position.y = 0;
+
+      teslaModel.traverse(c => {
+        if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
+      });
+
+      scene.add(teslaModel);
+      addCameraMarkers(teslaModel);
+      document.getElementById('overlay').style.display = 'none';
+    },
+    p => {
+      if (p.total)
+        document.getElementById('load-msg').textContent =
+          `Loading ${Math.round(p.loaded/p.total*100)}%…`;
+    },
+    err => {
+      document.getElementById('load-msg').innerHTML =
+        'Could not auto-load model.<br><small>Drag <b>tesla.glb</b> onto this window<br>' +
+        'or run: <code>python -m http.server 8080</code><br>then open localhost:8080/viewer/</small>';
+    }
+  );
+}
+
+// Try loading from same folder automatically
+loadGLB('tesla.glb');
+
+// ── drag & drop ───────────────────────────────────────────────────────────────
+document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+document.addEventListener('dragleave', () => document.body.classList.remove('dragging'));
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0];
+  if (f && f.name.endsWith('.glb'))
+    loadGLB(URL.createObjectURL(f));
+});
+
+// ── controls ─────────────────────────────────────────────────────────────────
+function setView(v) {
+  const positions = {
+    free:  [6, 3.5, 9], front: [0, 2, 8], side: [9, 2.5, 0],
+    top:   [0, 14, 0.1], rear: [0, 2, -8]
+  };
+  const [x, y, z] = positions[v] || positions.free;
+  cam.position.set(x, y, z);
+  controls.target.set(0, 0.5, 0);
+  controls.update();
+}
+
+function resetCam() { setView('free'); }
+
+function toggleSpin() {
+  spinning = !spinning;
+  const btn = document.getElementById('btn-spin');
+  btn.textContent = spinning ? '⏸ Spin' : '▶ Spin';
+  btn.classList.toggle('active', spinning);
+}
+
+function setEnv(env) {
+  if (env === 'highway') {
+    gnd.material.color.set(0x1a2a1a);
+    road.material.color.set(0x383838);
+  } else {
+    gnd.material.color.set(0x9a8a7a);  // city sidewalk
+    road.material.color.set(0x404040);
+  }
+}
+
+// ── placeholder camera views (animated noise) ─────────────────────────────────
+const CAM_CANVAS_IDS = ['c-front','c-left','c-right','c-rear'];
+const CAM_COLORS = ['#00e87a','#ff8c00','#1e90ff','#ff2d6b'];
+let noiseT = 0;
+
+function drawCamPlaceholders() {
+  noiseT++;
+  CAM_CANVAS_IDS.forEach((id, i) => {
+    const c   = document.getElementById(id);
+    const ctx = c.getContext('2d');
+    const W = c.width, H = c.height;
+
+    // animated gradient background
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#090d14');
+    g.addColorStop(1, '#111722');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // faint road lines (simulate perspective)
+    ctx.strokeStyle = '#ffffff18';
+    ctx.lineWidth = 1;
+    [-15, 0, 15].forEach(ox => {
+      ctx.beginPath();
+      ctx.moveTo(W/2 + ox * (noiseT % 2 === 0 ? 1 : 1), H);
+      ctx.lineTo(W/2 + ox * 0.2, H * 0.35);
+      ctx.stroke();
+    });
+
+    // horizon
+    ctx.fillStyle = '#1a2430';
+    ctx.fillRect(0, H * 0.35, W, H * 0.05);
+
+    // crosshair
+    ctx.strokeStyle = CAM_COLORS[i] + '55';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(W/2, 0); ctx.lineTo(W/2, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+
+    // label
+    ctx.fillStyle = CAM_COLORS[i];
+    ctx.font      = 'bold 9px Courier New';
+    ctx.fillText(CAMERA_NAMES[i].toUpperCase(), 4, 13);
+  });
+}
+const CAMERA_NAMES = ['FRONT','LEFT','RIGHT','REAR'];
+
+// ── resize ───────────────────────────────────────────────────────────────────
+function onResize() {
+  const vp = document.getElementById('viewport');
+  const W  = vp.clientWidth, H = vp.clientHeight;
+  cam.aspect = W / H;
+  cam.updateProjectionMatrix();
+  renderer.setSize(W, H);
+}
+window.addEventListener('resize', onResize);
+onResize();
+
+// ── render loop ───────────────────────────────────────────────────────────────
+let frame = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  frame++;
+
+  if (spinning && teslaModel) {
+    spinAngle += 0.008;
+    teslaModel.rotation.y = spinAngle;
+  }
+
+  controls.update();
+  renderer.render(scene, cam);
+
+  if (frame % 6 === 0) drawCamPlaceholders();
+}
+animate();
+</script>
+</body>
+</html>
